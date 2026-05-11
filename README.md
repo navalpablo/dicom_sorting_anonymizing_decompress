@@ -23,6 +23,26 @@ This tool provides functionality for sorting and anonymizing DICOM files.
   - With **Basic / Strict** anonymization: anonymization is applied using the correlation file; patients not on the list are skipped.
 - The list of skipped (unmapped) PatientIDs is written to `skipped_unmapped_patients.txt` in the output directory.
 - GUI updated with a folder-structure dropdown and a "Skip patients not in ID correlation file" checkbox. The GUI blocks execution if skip-unmapped is checked without a correlation file.
+- **UID-filtered variant**: a new standalone script `dicom_sorting_tool_uid_filter.py` and a matching GUI panel that only process DICOM files whose `StudyInstanceUID` or `SeriesInstanceUID` is in a user-supplied list (one UID per line, `#` for comments). Listing a `StudyInstanceUID` keeps every series of that study; listing a `SeriesInstanceUID` keeps only that series.
+
+### UID-filtered sorting
+
+```bash
+# Keep only specific studies and series
+python dicom_sorting_tool_uid_filter.py \
+    --dicomin /path/to/unsorted --dicomout /path/to/sorted \
+    --study_uid_filter studies.txt \
+    --series_uid_filter series.txt
+```
+
+At least one of `--study_uid_filter` and `--series_uid_filter` must be provided. The variant supports every flag of the main tool (anonymization, ID correlation, decompression, folder structure, etc.). In the GUI, use the "UID-Filtered Sorting" panel.
+
+UID list file format:
+```text
+# This is a comment
+1.2.840.113619.2.55.3.604688119.868.1234567890.123
+1.2.840.113619.2.55.3.604688119.868.1234567890.124  # inline comment ok
+```
 
 ##  Download:
 The executable for this tool is available in the releases section of this repository.

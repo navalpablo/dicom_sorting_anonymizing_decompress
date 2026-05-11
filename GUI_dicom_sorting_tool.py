@@ -21,7 +21,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 import pydicom
-from dicom_sorting_tool import sort_dicom, decompress_dataset, read_id_correlation
+from dicom_sorting_tool import (
+    sort_dicom, decompress_dataset, read_id_correlation, read_uid_filter
+)
 from to_explicit_pydicom import walk        # <-- pure-Python converter (no DCMTK)
 
 # --------------------------------------------------
@@ -80,7 +82,14 @@ class SortingThread(QThread):
          self.anonymize_acquisition_date, self.preserve_private_tags,
          self.anonymize_accession, self.include_study_uid,
          self.skip_missing_id) = a
+        # Optional UID filters (set via set_uid_filters)
+        self.study_uid_filter = None
+        self.series_uid_filter = None
         self.cancel_flag = multiprocessing.Value('b', False)
+
+    def set_uid_filters(self, study_uid_filter=None, series_uid_filter=None):
+        self.study_uid_filter = study_uid_filter
+        self.series_uid_filter = series_uid_filter
 
     def run(self):
         try:
@@ -92,6 +101,8 @@ class SortingThread(QThread):
                 self.anonymize_accession,
                 include_study_uid=self.include_study_uid,
                 skip_missing_id=self.skip_missing_id,
+                study_uid_filter=self.study_uid_filter,
+                series_uid_filter=self.series_uid_filter,
                 progress_callback=self.progress.emit,
                 cancel_flag=self.cancel_flag
             )
@@ -226,6 +237,73 @@ class DicomSortingGUI(QWidget):
         layout.addWidget(sorting_group)
 
         # ==============================================================
+        # 1b. UID-FILTERED SORTING PANEL
+        # ==============================================================
+        uid_group = QGroupBox("UID-Filtered Sorting (only files matching listed Study/Series UIDs)")
+        uid_layout = QVBoxLayout()
+
+        # input / output
+        self.uid_input_edit  = self._dir_row("Input Directory:", uid_layout)
+        self.uid_output_edit = self._dir_row("Output Directory:", uid_layout)
+
+        # UID filter files
+        self.uid_study_edit  = self._file_row(
+            "Study UIDs file:", uid_layout, self.show_uid_filter_info)
+        self.uid_series_edit = self._file_row(
+            "Series UIDs file:", uid_layout, self.show_uid_filter_info)
+
+        # folder structure dropdown
+        uid_folder_layout = QHBoxLayout()
+        uid_folder_layout.addWidget(QLabel("Folder structure:"))
+        self.uid_folder_struct_combo = QComboBox()
+        self.uid_folder_struct_combo.addItem(
+            "PatientID / StudyDate / SeriesNumber_Description", False)
+        self.uid_folder_struct_combo.addItem(
+            "PatientID / StudyDate_StudyInstanceUID / SeriesNumber_Description", True)
+        uid_folder_layout.addWidget(self.uid_folder_struct_combo, 1)
+        uid_layout.addLayout(uid_folder_layout)
+
+        # anonymisation radios
+        uid_anon_layout = QHBoxLayout()
+        self.uid_anon_group = QButtonGroup()
+        self.uid_no_anon_radio    = QRadioButton("No anonymization")
+        self.uid_basic_anon_radio = QRadioButton("Basic")
+        self.uid_strict_anon_radio= QRadioButton("Strict")
+        for rb in (self.uid_no_anon_radio, self.uid_basic_anon_radio, self.uid_strict_anon_radio):
+            self.uid_anon_group.addButton(rb)
+            uid_anon_layout.addWidget(rb)
+        self.uid_no_anon_radio.setChecked(True)
+        uid_layout.addLayout(uid_anon_layout)
+
+        # ID correlation file
+        self.uid_id_edit = self._file_row("ID Correlation File:", uid_layout, self.show_id_info)
+
+        # checkboxes
+        self.uid_skip_unmapped_check    = self._add_cb(
+            "Skip patients not in ID correlation file", uid_layout)
+        self.uid_id_from_name_check     = self._add_cb(
+            "Read original ID from PatientName", uid_layout)
+        self.uid_decompress_check       = self._add_cb("Decompress", uid_layout)
+        self.uid_skip_derived_check     = self._add_cb(
+            "Skip Secondary/Derived images", uid_layout)
+        self.uid_skip_burned_check      = self._add_cb("Skip Burned-in images", uid_layout)
+        self.uid_preserve_private_check = self._add_cb(
+            "Preserve Private Tags (strict mode)", uid_layout)
+        self.uid_anon_birth_check       = self._add_cb(
+            "Anonymize Birth Date to 01-Jan", uid_layout)
+        self.uid_anon_acq_check         = self._add_cb(
+            "Anonymize Acquisition Date to 01-Jan", uid_layout)
+        self.uid_anon_accession_check   = self._add_cb(
+            "Anonymize Accession Number", uid_layout)
+
+        uid_btn = QPushButton("Execute UID-Filtered Sorting")
+        uid_btn.clicked.connect(self.execute_uid_sorting)
+        uid_layout.addWidget(uid_btn)
+
+        uid_group.setLayout(uid_layout)
+        layout.addWidget(uid_group)
+
+        # ==============================================================
         # 2. IN-PLACE DECOMPRESSION PANEL
         # ==============================================================
         decomp_group = QGroupBox("In-place Decompression")
@@ -335,6 +413,22 @@ class DicomSortingGUI(QWidget):
             "   Each study gets its own folder, even if performed on the same date.\n"
             "   Useful when a patient has multiple studies on the same day.")
 
+    def show_uid_filter_info(self):
+        QMessageBox.information(self, "UID Filter Files",
+            "Provide one or both files (at least one is required):\n\n"
+            "  • Study UIDs file: list of StudyInstanceUIDs to keep.\n"
+            "    Listing a StudyInstanceUID keeps EVERY series of that study.\n\n"
+            "  • Series UIDs file: list of SeriesInstanceUIDs to keep.\n"
+            "    Only the listed series will be kept.\n\n"
+            "File format (same for both):\n"
+            "  - One UID per line.\n"
+            "  - Lines starting with '#' are comments.\n"
+            "  - Inline trailing comments after '#' are stripped.\n"
+            "  - Blank lines are ignored.\n\n"
+            "A file is kept if its StudyInstanceUID is in the study list\n"
+            "OR its SeriesInstanceUID is in the series list. Everything else\n"
+            "is skipped.")
+
     def show_help(self):
         QMessageBox.information(self, "Help",
             "1. **Sorting** – choose input & output, anonymization level, options.\n"
@@ -400,6 +494,81 @@ class DicomSortingGUI(QWidget):
             self.sorting_thread.wait()
         if self.progress_dialog:
             self.progress_dialog.close()
+
+    # ---------- UID-filtered sorting ----------
+    def execute_uid_sorting(self):
+        inp  = self.uid_input_edit.text()
+        outp = self.uid_output_edit.text()
+        if not inp or not outp:
+            QMessageBox.warning(self, "Error", "Select both input and output directories.")
+            return
+
+        study_path  = self.uid_study_edit.text().strip()
+        series_path = self.uid_series_edit.text().strip()
+        if not study_path and not series_path:
+            QMessageBox.warning(self, "Error",
+                "Provide at least one UID filter file (Study UIDs or Series UIDs).")
+            return
+
+        try:
+            study_set  = read_uid_filter(study_path)  if study_path  else None
+            series_set = read_uid_filter(series_path) if series_path else None
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to read UID filter file:\n{e}")
+            return
+
+        if (study_set is not None and len(study_set) == 0) and \
+           (series_set is None or len(series_set) == 0):
+            QMessageBox.warning(self, "Error",
+                "The UID filter files are empty. Nothing would be processed.")
+            return
+
+        basic  = self.uid_basic_anon_radio.isChecked()
+        strict = self.uid_strict_anon_radio.isChecked()
+        skip_unmapped = self.uid_skip_unmapped_check.isChecked()
+        id_path = self.uid_id_edit.text().strip()
+
+        if skip_unmapped and not id_path:
+            QMessageBox.warning(self, "Error",
+                "'Skip patients not in ID correlation file' is checked, but no\n"
+                "ID correlation file was provided.")
+            return
+
+        id_map = read_id_correlation(id_path) if id_path else None
+        include_study_uid = bool(self.uid_folder_struct_combo.currentData())
+
+        n_study = len(study_set) if study_set else 0
+        n_series = len(series_set) if series_set else 0
+
+        self.progress_dialog = QProgressDialog(
+            f"UID-Filtered Sorting (study={n_study}, series={n_series}) …",
+            "Cancel", 0, 100, self)
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.canceled.connect(self.cancel_sorting)
+        self.progress_dialog.show()
+
+        self.sorting_thread = SortingThread(
+            inp, outp,
+            basic or strict,
+            id_map,
+            self.uid_decompress_check.isChecked(),
+            strict,
+            self.uid_skip_derived_check.isChecked(),
+            self.uid_skip_burned_check.isChecked(),
+            self.uid_id_from_name_check.isChecked(),
+            self.uid_anon_birth_check.isChecked(),
+            self.uid_anon_acq_check.isChecked(),
+            self.uid_preserve_private_check.isChecked(),
+            self.uid_anon_accession_check.isChecked(),
+            include_study_uid,
+            skip_unmapped
+        )
+        self.sorting_thread.set_uid_filters(study_set, series_set)
+        self.sorting_thread.progress.connect(self.update_sorting_progress)
+        self.sorting_thread.finished.connect(self.sorting_finished)
+        self.sorting_thread.error.connect(self.sorting_error)
+        self.sorting_thread.start()
 
     def update_sorting_progress(self, v):
         if self.progress_dialog and not self.progress_dialog.wasCanceled():

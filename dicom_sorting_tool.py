@@ -65,6 +65,26 @@ def read_id_correlation(file_path):
                     logging.warning(f"Invalid line format: {line}")
     return id_map
 
+def read_uid_filter(file_path):
+    """Read a list of DICOM UIDs (one per line) into a set.
+    Lines starting with '#' are treated as comments. Inline comments
+    after '#' are stripped. Empty lines are ignored.
+    Returns None if file_path is empty/None.
+    """
+    if not file_path:
+        return None
+    uids = set()
+    with open(file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if '#' in line:
+                line = line.split('#', 1)[0].strip()
+            if line:
+                uids.add(line)
+    return uids
+
 def generate_dummy_date(original_date, anonymize_to_first_of_year=False):
     if not original_date:
         return "20000101"  # Default to January 1, 2000 if no original date
@@ -304,14 +324,18 @@ def copy_dicom_image(src_file, dest_base_dir, pattern, anonymize=False, id_map=N
     new_filename = f"{sop_instance_uid}.dcm"
     dataset.save_as(os.path.join(dest_directory, new_filename))
 
-def copy_directory(src_dir, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize, skip_derived, skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date, preserve_private_tags, anonymize_accession, skip_missing_id=False, progress_callback=None, cancel_flag=None):
+def copy_directory(src_dir, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize, skip_derived, skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date, preserve_private_tags, anonymize_accession, skip_missing_id=False, study_uid_filter=None, series_uid_filter=None, progress_callback=None, cancel_flag=None):
     all_files = [os.path.join(root, file) for root, _, files in os.walk(src_dir) for file in files]
     total_files = len(all_files)
+
+    # Freeze filter sets so worker processes share immutable copies.
+    study_filter_frozen = frozenset(study_uid_filter) if study_uid_filter else None
+    series_filter_frozen = frozenset(series_uid_filter) if series_uid_filter else None
 
     args_list = [(file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize,
                   skip_derived, skip_burned_in, id_from_name, anonymize_birth_date,
                   anonymize_acquisition_date, preserve_private_tags, anonymize_accession,
-                  skip_missing_id) for file in all_files]
+                  skip_missing_id, study_filter_frozen, series_filter_frozen) for file in all_files]
 
     success_count = 0
     failure_count = 0
@@ -357,7 +381,8 @@ def copy_directory(src_dir, dest_dir, pattern, anonymize, id_map, decompress, st
 def sort_dicom(input_dir, output_dir, anonymize, id_map, decompress, strict_anonymize, skip_derived,
                skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date,
                preserve_private_tags, anonymize_accession=False, include_study_uid=False,
-               skip_missing_id=False, progress_callback=None, cancel_flag=None):
+               skip_missing_id=False, study_uid_filter=None, series_uid_filter=None,
+               progress_callback=None, cancel_flag=None):
     # Guard: skipping unmapped patients only makes sense with an ID correlation file.
     if skip_missing_id and not id_map:
         raise ValueError(
@@ -375,13 +400,14 @@ def sort_dicom(input_dir, output_dir, anonymize, id_map, decompress, strict_anon
     copy_directory(input_dir, output_dir, pattern, anonymize, id_map, decompress, strict_anonymize,
                    skip_derived, skip_burned_in, id_from_name, anonymize_birth_date,
                    anonymize_acquisition_date, preserve_private_tags, anonymize_accession,
-                   skip_missing_id, progress_callback, cancel_flag)
+                   skip_missing_id, study_uid_filter, series_uid_filter,
+                   progress_callback, cancel_flag)
 
 def process_file(args):
     (file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize,
      skip_derived, skip_burned_in, id_from_name, anonymize_birth_date,
      anonymize_acquisition_date, preserve_private_tags, anonymize_accession,
-     skip_missing_id) = args
+     skip_missing_id, study_uid_filter, series_uid_filter) = args
     try:
         dataset = pydicom.dcmread(file)
 
@@ -392,6 +418,24 @@ def process_file(args):
         if skip_burned_in and has_burned_in_annotation(dataset):
             logging.info(f"Skipping image with burned-in annotation: {file}")
             return file, False, None
+
+        # UID-level filtering: keep file only if its StudyInstanceUID is in the
+        # study filter set OR its SeriesInstanceUID is in the series filter set.
+        if study_uid_filter is not None or series_uid_filter is not None:
+            try:
+                study_uid = str(getattr(dataset, 'StudyInstanceUID', '') or '')
+                series_uid = str(getattr(dataset, 'SeriesInstanceUID', '') or '')
+            except Exception:
+                study_uid = ''
+                series_uid = ''
+            study_match = bool(study_uid_filter) and study_uid in study_uid_filter
+            series_match = bool(series_uid_filter) and series_uid in series_uid_filter
+            if not (study_match or series_match):
+                logging.info(
+                    f"Skipping file not in UID filter (Study={study_uid}, "
+                    f"Series={series_uid}): {file}"
+                )
+                return file, False, None
 
         # Skip files whose patient is not in the ID correlation file
         if skip_missing_id and id_map is not None:
@@ -469,6 +513,11 @@ def main():
         print(f"Missing PatientIDs logged in '{log_file_path}'.")
         logging.info(f"Missing PatientIDs logged in '{log_file_path}'.")
 
+# Version of the DICOM Sorting Toolkit core module.
+__version__ = "1.6.0"
+
+
 if __name__ == '__main__':
     multiprocessing.freeze_support()
     main()
+

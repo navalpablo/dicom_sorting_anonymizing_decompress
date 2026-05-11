@@ -15,9 +15,10 @@ a = Analysis(
     ['GUI_dicom_sorting_tool.py'],        # your main GUI
     pathex=[SPEC_DIR],
     binaries=[],
-    # Include both your helper modules as data files
+    # Include helper modules as data files
     datas=[
         ('dicom_sorting_tool.py', '.'),
+        ('dicom_sorting_tool_uid_filter.py', '.'),
         ('to_explicit_pydicom.py', '.'),
     ],
     hiddenimports=pydicom_hidden_imports,
