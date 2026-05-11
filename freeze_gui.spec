@@ -1,15 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+
+# Resolve the .spec's directory so the build is portable across machines.
+SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 
 # Collect all submodules of pydicom
 pydicom_hidden_imports = collect_submodules('pydicom')
 
 a = Analysis(
     ['GUI_dicom_sorting_tool.py'],        # your main GUI
-    pathex=['C:/Users/h501upnb/Downloads/dicom_sorting_toolkit'],  # adjust if needed
+    pathex=[SPEC_DIR],
     binaries=[],
     # Include both your helper modules as data files
     datas=[
@@ -40,7 +44,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],                     # runtime hooks go here if you have any
-    name='DICOM_Sorting_Tool',
+    name='DICOM_Sorting_Tool_v1.6.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

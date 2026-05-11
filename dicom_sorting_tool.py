@@ -294,6 +294,7 @@ def copy_dicom_image(src_file, dest_base_dir, pattern, anonymize=False, id_map=N
     # Replace placeholders in the pattern
     pattern = pattern.replace('%PatientID%', get_dicom_attribute(dataset, 'PatientID'))
     pattern = pattern.replace('%StudyDate%', study_date)
+    pattern = pattern.replace('%StudyInstanceUID%', get_dicom_attribute(dataset, 'StudyInstanceUID'))
     pattern = pattern.replace('%SeriesDescription%', series_dir)
 
     dest_directory = sanitize_filepath(os.path.join(dest_base_dir, pattern), platform='auto')
@@ -303,21 +304,28 @@ def copy_dicom_image(src_file, dest_base_dir, pattern, anonymize=False, id_map=N
     new_filename = f"{sop_instance_uid}.dcm"
     dataset.save_as(os.path.join(dest_directory, new_filename))
 
-def copy_directory(src_dir, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize, skip_derived, skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date, preserve_private_tags, anonymize_accession, progress_callback=None, cancel_flag=None):
+def copy_directory(src_dir, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize, skip_derived, skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date, preserve_private_tags, anonymize_accession, skip_missing_id=False, progress_callback=None, cancel_flag=None):
     all_files = [os.path.join(root, file) for root, _, files in os.walk(src_dir) for file in files]
     total_files = len(all_files)
-    
-    args_list = [(file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize, skip_derived, skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date, preserve_private_tags, anonymize_accession) for file in all_files]
+
+    args_list = [(file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize,
+                  skip_derived, skip_burned_in, id_from_name, anonymize_birth_date,
+                  anonymize_acquisition_date, preserve_private_tags, anonymize_accession,
+                  skip_missing_id) for file in all_files]
 
     success_count = 0
     failure_count = 0
+    skipped_unmapped = set()
 
     with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
-        for i, (file, success) in enumerate(pool.imap_unordered(process_file, args_list)):
+        for i, (file, success, skipped_id) in enumerate(pool.imap_unordered(process_file, args_list)):
             if cancel_flag and cancel_flag.value:
                 pool.terminate()
                 logging.info("Sorting process was cancelled.")
                 return
+
+            if skipped_id:
+                skipped_unmapped.add(skipped_id)
 
             if success:
                 success_count += 1
@@ -326,40 +334,82 @@ def copy_directory(src_dir, dest_dir, pattern, anonymize, id_map, decompress, st
             if progress_callback:
                 progress_callback(int((i + 1) / total_files * 100))
 
+    # Write skipped unmapped patient IDs to a file in the output directory
+    if skip_missing_id and skipped_unmapped:
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            skipped_file = os.path.join(dest_dir, 'skipped_unmapped_patients.txt')
+            with open(skipped_file, 'w') as f:
+                f.write("# PatientIDs (or PatientNames if id_from_name) found in source\n")
+                f.write("# but absent from the ID correlation file. These files were skipped.\n")
+                for sid in sorted(skipped_unmapped):
+                    f.write(f"{sid}\n")
+            logging.info(f"Wrote {len(skipped_unmapped)} unmapped patient ID(s) to {skipped_file}")
+            print(f"Skipped unmapped patients logged in '{skipped_file}'.")
+        except Exception as e:
+            logging.error(f"Failed to write skipped patients log: {e}")
+
     print(f"\nProcessing completed. Successes: {success_count}, Failures: {failure_count}")
+    if skip_missing_id:
+        print(f"Unique unmapped patients skipped: {len(skipped_unmapped)}")
     logging.info(f"Processing completed. Successes: {success_count}, Failures: {failure_count}")
     
-def sort_dicom(input_dir, output_dir, anonymize, id_map, decompress, strict_anonymize, skip_derived, 
-               skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date, 
-               preserve_private_tags, anonymize_accession=False, progress_callback=None, cancel_flag=None):
-    pattern = '%PatientID%/%StudyDate%/%SeriesDescription%'
+def sort_dicom(input_dir, output_dir, anonymize, id_map, decompress, strict_anonymize, skip_derived,
+               skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date,
+               preserve_private_tags, anonymize_accession=False, include_study_uid=False,
+               skip_missing_id=False, progress_callback=None, cancel_flag=None):
+    # Guard: skipping unmapped patients only makes sense with an ID correlation file.
+    if skip_missing_id and not id_map:
+        raise ValueError(
+            "skip_missing_id was requested but no ID correlation file was provided. "
+            "Without a correlation file, every file would be skipped."
+        )
+
+    if include_study_uid:
+        pattern = '%PatientID%/%StudyDate%_%StudyInstanceUID%/%SeriesDescription%'
+    else:
+        pattern = '%PatientID%/%StudyDate%/%SeriesDescription%'
+
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    copy_directory(input_dir, output_dir, pattern, anonymize, id_map, decompress, strict_anonymize, 
-                   skip_derived, skip_burned_in, id_from_name, anonymize_birth_date, 
+    copy_directory(input_dir, output_dir, pattern, anonymize, id_map, decompress, strict_anonymize,
+                   skip_derived, skip_burned_in, id_from_name, anonymize_birth_date,
                    anonymize_acquisition_date, preserve_private_tags, anonymize_accession,
-                   progress_callback, cancel_flag)
+                   skip_missing_id, progress_callback, cancel_flag)
 
 def process_file(args):
-    file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize, skip_derived, skip_burned_in, id_from_name, anonymize_birth_date, anonymize_acquisition_date, preserve_private_tags, anonymize_accession = args
+    (file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize,
+     skip_derived, skip_burned_in, id_from_name, anonymize_birth_date,
+     anonymize_acquisition_date, preserve_private_tags, anonymize_accession,
+     skip_missing_id) = args
     try:
         dataset = pydicom.dcmread(file)
-        
+
         if skip_derived and is_derived_image(dataset):
             logging.info(f"Skipping derived image: {file}")
-            return file, False
+            return file, False, None
 
         if skip_burned_in and has_burned_in_annotation(dataset):
             logging.info(f"Skipping image with burned-in annotation: {file}")
-            return file, False
+            return file, False, None
 
-        copy_dicom_image(file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize, 
+        # Skip files whose patient is not in the ID correlation file
+        if skip_missing_id and id_map is not None:
+            try:
+                original_id = str(dataset.PatientName if id_from_name else dataset.PatientID)
+            except AttributeError:
+                original_id = ''
+            if original_id not in id_map:
+                logging.info(f"Skipping unmapped patient '{original_id}' in file: {file}")
+                return file, False, original_id
+
+        copy_dicom_image(file, dest_dir, pattern, anonymize, id_map, decompress, strict_anonymize,
                         id_from_name, anonymize_birth_date, anonymize_acquisition_date, preserve_private_tags,
                         anonymize_accession)
-        return file, True
+        return file, True, None
     except Exception as e:
         logging.error(f"Error processing file {file}: {str(e)}")
-        return file, False
+        return file, False, None
         
         
 def main():
@@ -378,24 +428,33 @@ def main():
     parser.add_argument('--anonymize_acquisition_date', action='store_true', help='If specified, anonymizes the AcquisitionDate to January 1st of the same year.')
     parser.add_argument('--preserve_private_tags', action='store_true', help='If specified, preserves private tags even in strict anonymization mode.')
     parser.add_argument('--anonymize_accession', action='store_true', help='If specified, anonymizes the Accession Number with a random 16-digit number.')
+    parser.add_argument('--include_study_uid', action='store_true',
+                        help='If specified, study folders are named "StudyDate_StudyInstanceUID" instead of just "StudyDate".')
+    parser.add_argument('--skip_unmapped', action='store_true',
+                        help='If specified, files whose PatientID is not present in --ID_correlation are skipped (requires --ID_correlation).')
     args = parser.parse_args()
 
     id_map = read_id_correlation(args.ID_correlation) if args.ID_correlation else None
 
+    if args.skip_unmapped and not id_map:
+        parser.error("--skip_unmapped requires --ID_correlation to be provided.")
+
     start_time = time.time()
 
-    sort_dicom(args.dicomin, args.dicomout, 
-               args.anonymize or args.anonymize_strict, 
-               id_map, 
-               args.decompress, 
-               args.anonymize_strict, 
-               args.skip_derived, 
-               args.skip_burned_in_images, 
+    sort_dicom(args.dicomin, args.dicomout,
+               args.anonymize or args.anonymize_strict,
+               id_map,
+               args.decompress,
+               args.anonymize_strict,
+               args.skip_derived,
+               args.skip_burned_in_images,
                args.id_from_name,
                args.anonymize_birth_date,
                args.anonymize_acquisition_date,
                args.preserve_private_tags,
-               args.anonymize_accession)
+               args.anonymize_accession,
+               include_study_uid=args.include_study_uid,
+               skip_missing_id=args.skip_unmapped)
 
     end_time = time.time()
 

@@ -16,7 +16,7 @@ import sys, os, logging, multiprocessing
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFileDialog, QRadioButton, QButtonGroup, QMessageBox,
-    QGroupBox, QCheckBox, QProgressDialog
+    QGroupBox, QCheckBox, QProgressDialog, QComboBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
@@ -78,7 +78,8 @@ class SortingThread(QThread):
          self.decompress, self.strict_anonymize, self.skip_derived,
          self.skip_burned, self.id_from_name, self.anonymize_birth_date,
          self.anonymize_acquisition_date, self.preserve_private_tags,
-         self.anonymize_accession) = a
+         self.anonymize_accession, self.include_study_uid,
+         self.skip_missing_id) = a
         self.cancel_flag = multiprocessing.Value('b', False)
 
     def run(self):
@@ -89,6 +90,8 @@ class SortingThread(QThread):
                 self.skip_burned, self.id_from_name, self.anonymize_birth_date,
                 self.anonymize_acquisition_date, self.preserve_private_tags,
                 self.anonymize_accession,
+                include_study_uid=self.include_study_uid,
+                skip_missing_id=self.skip_missing_id,
                 progress_callback=self.progress.emit,
                 cancel_flag=self.cancel_flag
             )
@@ -170,6 +173,21 @@ class DicomSortingGUI(QWidget):
         self.input_edit  = self._dir_row("Input Directory:", sorting_layout)
         self.output_edit = self._dir_row("Output Directory:", sorting_layout)
 
+        # folder structure dropdown
+        folder_layout = QHBoxLayout()
+        folder_layout.addWidget(QLabel("Folder structure:"))
+        self.folder_struct_combo = QComboBox()
+        # Each entry stores its include_study_uid flag as user data
+        self.folder_struct_combo.addItem(
+            "PatientID / StudyDate / SeriesNumber_Description", False)
+        self.folder_struct_combo.addItem(
+            "PatientID / StudyDate_StudyInstanceUID / SeriesNumber_Description", True)
+        folder_layout.addWidget(self.folder_struct_combo, 1)
+        folder_info = QPushButton("?")
+        folder_info.clicked.connect(self.show_folder_info)
+        folder_layout.addWidget(folder_info)
+        sorting_layout.addLayout(folder_layout)
+
         # anonymisation radio buttons
         anon_layout = QHBoxLayout()
         self.anon_group = QButtonGroup()
@@ -188,6 +206,8 @@ class DicomSortingGUI(QWidget):
         self.id_edit = self._file_row("ID Correlation File:", sorting_layout, self.show_id_info)
 
         # checkboxes
+        self.skip_unmapped_check         = self._add_cb(
+            "Skip patients not in ID correlation file", sorting_layout)
         self.id_from_name_check          = self._add_cb("Read original ID from PatientName", sorting_layout)
         self.decompress_check            = self._add_cb("Decompress", sorting_layout)
         self.skip_derived_check          = self._add_cb("Skip Secondary/Derived images", sorting_layout)
@@ -243,7 +263,7 @@ class DicomSortingGUI(QWidget):
         layout.addWidget(disclaimer)
 
         self.setLayout(layout)
-        self.setWindowTitle("DICOM Sorting Toolkit v0.1.5.0")
+        self.setWindowTitle("DICOM Sorting Toolkit v1.6.0")
         self.show()
 
     # ---------- convenience layout helpers ----------
@@ -287,10 +307,14 @@ class DicomSortingGUI(QWidget):
     # ---------- information pop-ups ----------
     def show_anon_info(self):
         QMessageBox.information(self, "Anonymization Info",
-            "No Anonymization: No changes to patient information.\n\n"
+            "No Anonymization: No changes to patient information.\n"
+            "  Combine with 'Skip patients not in ID correlation file'\n"
+            "  to keep original PatientIDs but only sort patients on the list.\n\n"
             "Basic Anonymization:\n"
             "- Anonymizes: PatientName, PatientID\n"
-            "- If no ID correlation file is provided, a random 8-character ID is used.\n\n"
+            "- If no ID correlation file is provided, a random 8-character ID is used\n"
+            "  (unless 'Skip patients not in ID correlation file' is checked, in which\n"
+            "  case unmapped patients are skipped instead).\n\n"
             "Strict Anonymization (adds to Basic):\n"
             "- Anonymizes all Patient-* tags, removes private tags,\n"
             "- Creates dummy UIDs, etc.\n\n"
@@ -301,6 +325,15 @@ class DicomSortingGUI(QWidget):
             "Tab-separated or CSV with two columns:\n"
             "   oldID    newID\n"
             "Used to map original PatientIDs (or PatientNames) to new IDs.")
+
+    def show_folder_info(self):
+        QMessageBox.information(self, "Folder Structure",
+            "Choose how output folders are organised:\n\n"
+            "1) PatientID / StudyDate / SeriesNumber_Description\n"
+            "   Default. Studies on the same date for the same patient share a folder.\n\n"
+            "2) PatientID / StudyDate_StudyInstanceUID / SeriesNumber_Description\n"
+            "   Each study gets its own folder, even if performed on the same date.\n"
+            "   Useful when a patient has multiple studies on the same day.")
 
     def show_help(self):
         QMessageBox.information(self, "Help",
@@ -320,7 +353,19 @@ class DicomSortingGUI(QWidget):
 
         basic  = self.basic_anon_radio.isChecked()
         strict = self.strict_anon_radio.isChecked()
-        id_map = read_id_correlation(self.id_edit.text()) if self.id_edit.text() else None
+        skip_unmapped = self.skip_unmapped_check.isChecked()
+        id_path = self.id_edit.text().strip()
+
+        # Validate: skip-unmapped requires a correlation file
+        if skip_unmapped and not id_path:
+            QMessageBox.warning(self, "Error",
+                "'Skip patients not in ID correlation file' is checked, but no\n"
+                "ID correlation file was provided. Please select a correlation file\n"
+                "or uncheck the option.")
+            return
+
+        id_map = read_id_correlation(id_path) if id_path else None
+        include_study_uid = bool(self.folder_struct_combo.currentData())
 
         self.progress_dialog = QProgressDialog("Sorting …", "Cancel", 0, 100, self)
         self.progress_dialog.setWindowModality(Qt.WindowModal)
@@ -340,7 +385,9 @@ class DicomSortingGUI(QWidget):
             self.anonymize_birth_date_check.isChecked(),
             self.anonymize_acquisition_date_check.isChecked(),
             self.preserve_private_tags_check.isChecked(),
-            self.anonymize_accession_check.isChecked()
+            self.anonymize_accession_check.isChecked(),
+            include_study_uid,
+            skip_unmapped
         )
         self.sorting_thread.progress.connect(self.update_sorting_progress)
         self.sorting_thread.finished.connect(self.sorting_finished)

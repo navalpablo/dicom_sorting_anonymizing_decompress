@@ -2,13 +2,27 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.13099114.svg)](https://zenodo.org/doi/10.5281/zenodo.13094029)
 
-This tool provides functionality for sorting and anonymizing DICOM files. 
+**Current version: v1.6.0**
+
+This tool provides functionality for sorting and anonymizing DICOM files.
 
 ## Features:
-- DICOM file sorting
+- DICOM file sorting with two selectable folder layouts:
+  - `PatientID/StudyDate/SeriesNumber_SeriesDescription` (default)
+  - `PatientID/StudyDate_StudyInstanceUID/SeriesNumber_SeriesDescription` (one folder per study, useful when a patient has multiple studies on the same day)
 - Basic and strict anonymization options
-- In-place files transfer syntax decompression. 
+- Optional ID correlation file to map original PatientIDs to new IDs
+- Optional "skip unmapped patients" mode: only files whose PatientID appears in the correlation file are transferred. Skipped PatientIDs are written to `skipped_unmapped_patients.txt` in the output folder.
+- In-place files transfer syntax decompression
 - GUI for easy operation
+
+## What's new in v1.6.0
+- **Folder-structure option**: choose between the legacy layout and a new `StudyDate_StudyInstanceUID` layout that gives each study its own folder.
+- **Skip patients not in ID correlation file**: when checked, files whose PatientID (or PatientName, with `--id_from_name`) is not in the correlation file are skipped instead of being given an auto-generated ID. Works with all anonymization modes:
+  - With **No anonymization**: original PatientIDs are kept; only patients on the list are sorted.
+  - With **Basic / Strict** anonymization: anonymization is applied using the correlation file; patients not on the list are skipped.
+- The list of skipped (unmapped) PatientIDs is written to `skipped_unmapped_patients.txt` in the output directory.
+- GUI updated with a folder-structure dropdown and a "Skip patients not in ID correlation file" checkbox. The GUI blocks execution if skip-unmapped is checked without a correlation file.
 
 ##  Download:
 The executable for this tool is available in the releases section of this repository.
@@ -53,6 +67,26 @@ To replace PatientID based on a correlation table:
 python dicom_sorting_tool.py --dicomin /path/to/unsorted --dicomout /path/to/sorted --anonymize --ID_correlation /path/to/ID_correlation.txt
 ```
 
+To use the per-study folder layout (`StudyDate_StudyInstanceUID`):
+
+```bash
+python dicom_sorting_tool.py --dicomin /path/to/unsorted --dicomout /path/to/sorted --include_study_uid
+```
+
+To only sort patients listed in the correlation file (skip everyone else):
+
+```bash
+# Keep original PatientIDs, skip anyone not on the list
+python dicom_sorting_tool.py --dicomin /path/to/unsorted --dicomout /path/to/sorted \
+    --ID_correlation /path/to/ID_correlation.txt --skip_unmapped
+
+# Anonymize using the list, skip anyone not on the list
+python dicom_sorting_tool.py --dicomin /path/to/unsorted --dicomout /path/to/sorted \
+    --anonymize --ID_correlation /path/to/ID_correlation.txt --skip_unmapped
+```
+
+The list of patients that were present in the source but missing from the correlation file is written to `skipped_unmapped_patients.txt` inside the output directory.
+
 ### Arguments
 
 - **`--dicomin`**: Path to the directory containing unsorted DICOM files.
@@ -63,6 +97,8 @@ python dicom_sorting_tool.py --dicomin /path/to/unsorted --dicomout /path/to/sor
 - **`--ID_correlation`**: (Optional) Path to a correlation file for anonymizing PatientID. The file should contain old and new IDs, separated by a comma, space, or tab.
 - **`--skip_derived`**: (Optional) If specified, skips DICOM files that are derived or secondary images.
 - **`--skip_burned_in_images`**: (Optional) If specified, skips DICOM files with burned-in annotations.
+- **`--include_study_uid`**: (Optional, *new in v1.6.0*) If specified, study folders are named `StudyDate_StudyInstanceUID` instead of just `StudyDate`. Useful when the same patient has multiple studies on the same day.
+- **`--skip_unmapped`**: (Optional, *new in v1.6.0*) If specified, files whose PatientID is not present in `--ID_correlation` are skipped (requires `--ID_correlation`). The list of skipped PatientIDs is written to `skipped_unmapped_patients.txt` in the output directory.
   
   
 ## Note:
